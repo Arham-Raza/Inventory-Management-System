@@ -1,0 +1,130 @@
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+enum Role {
+  SUPER_ADMIN
+  MANAGER
+  DATA_ENTRY
+  CASHIER
+}
+
+enum ItemStatus {
+  PENDING_APPROVAL
+  AVAILABLE
+  SOLD
+  RETURNED
+  REJECTED
+}
+
+model User {
+  id                     String          @id @default(uuid())
+  name                   String
+  email                  String          @unique
+  password               String
+  role                   Role            @default(CASHIER)
+  orders                 Order[]
+  createdInventoryItems  InventoryItem[] @relation("InventoryCreatedBy")
+  approvedInventoryItems InventoryItem[] @relation("InventoryApprovedBy")
+  manualDiscountsGiven   Order[]         @relation("ManualDiscountAuthorizedBy")
+  auditLogs              AuditLog[]
+  createdAt              DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
+}
+
+model Customer {
+  id        String   @id @default(uuid())
+  name      String
+  phone     String   @unique
+  email     String?
+  orders    Order[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model InventoryItem {
+  serialNumber String     @id
+  // Free-text batch/reference code entered by data entry staff, matched
+  // against the entry for this stock purchase in the external accounting
+  // software — lets accounting reconcile a physical unit to its ledger entry.
+  lotNumber    String?
+  modelName    String
+  processor    String
+  gpu          String
+  ram          String
+  storage      String
+  purchaseCost Decimal    @db.Decimal(10, 2)
+  retailPrice  Decimal    @db.Decimal(10, 2)
+  status       ItemStatus @default(PENDING_APPROVAL)
+  orderItemId  String?    @unique
+  orderItem    OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+  createdById  String?
+  createdBy    User?      @relation("InventoryCreatedBy", fields: [createdById], references: [id])
+  approvedById String?
+  approvedBy   User?      @relation("InventoryApprovedBy", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([lotNumber])
+  @@index([status])
+}
+
+model Order {
+  id                   String            @id @default(uuid())
+  cashierId            String
+  cashier              User              @relation(fields: [cashierId], references: [id])
+  customerId           String?
+  customer             Customer?         @relation(fields: [customerId], references: [id])
+  totalAmount          Decimal           @db.Decimal(10, 2)
+  appliedDiscountId    String?
+  discount             DiscountCampaign? @relation(fields: [appliedDiscountId], references: [id])
+  // One-off discount authorized by a MANAGER/SUPER_ADMIN at checkout (no
+  // pre-created campaign needed) — mutually exclusive with appliedDiscountId.
+  // Credentials are re-verified server-side at the moment of checkout, so
+  // manualDiscountById always names whoever actually authorized it.
+  manualDiscountType   String?
+  manualDiscountValue  Decimal?          @db.Decimal(10, 2)
+  manualDiscountReason String?
+  manualDiscountById   String?
+  manualDiscountBy     User?             @relation("ManualDiscountAuthorizedBy", fields: [manualDiscountById], references: [id])
+  items                OrderItem[]
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+}
+
+model OrderItem {
+  id            String         @id @default(uuid())
+  orderId       String
+  order         Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  inventoryItem InventoryItem?
+  priceAtSale   Decimal        @db.Decimal(10, 2)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model DiscountCampaign {
+  id        String   @id @default(uuid())
+  name      String
+  type      String // 'PERCENTAGE' or 'FIXED'
+  value     Decimal  @db.Decimal(10, 2)
+  isActive  Boolean  @default(false)
+  orders    Order[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  action    String
+  details   Json?
+  createdAt DateTime @default(now())
+}
