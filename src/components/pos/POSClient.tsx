@@ -1,8 +1,11 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { lookupInventoryItem, type InventoryLookupResult } from "@/actions/pos"
+import { scanBarcode, type ScanResult } from "@/actions/pos"
 import { createOrder } from "@/actions/order"
+import { lookupCustomerByPhone, registerCustomer, type CustomerSummary } from "@/actions/customer"
+import { recordReturnTriage, createWarrantyClaim } from "@/actions/warranty"
+import { pointsToValue, calculatePointsEarned } from "@/lib/loyalty"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
@@ -36,6 +39,17 @@ import {
   Building2,
   ShieldCheck,
   X,
+  Plus,
+  Minus,
+  Package,
+  UserPlus,
+  Gift,
+  ShieldAlert,
+  RotateCcw,
+  Repeat,
+  HandCoins,
+  ArrowLeftRight,
+  ClipboardCheck,
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -43,9 +57,12 @@ import { useBarcodeScanner } from "@/hooks/useBarcodeScanner"
 import { calculateOrderTotals, formatCurrency } from "@/lib/money"
 import { printAtSize } from "@/lib/print"
 import { ThermalReceipt } from "./ThermalReceipt"
+import { WarrantyClaimSlip } from "./WarrantyClaimSlip"
+import { PageHelp } from "@/components/layout/PageHelp"
 import Image from "next/image"
 
-export type CartItem = {
+export type LaptopCartItem = {
+  kind: "LAPTOP"
   serialNumber: string
   modelName: string
   processor: string
@@ -53,6 +70,24 @@ export type CartItem = {
   confirmedRam: string
   confirmedStorage: string
   retailPrice: number
+}
+
+export type AccessoryCartItem = {
+  kind: "ACCESSORY"
+  accessoryId: string
+  barcode: string
+  name: string
+  sellingPrice: number
+  quantity: number
+  // Stock snapshot at scan time — caps the +/- stepper client-side; the
+  // server re-checks the live count at checkout regardless.
+  quantityInStock: number
+}
+
+export type CartItem = LaptopCartItem | AccessoryCartItem
+
+function cartItemKey(item: CartItem) {
+  return item.kind === "LAPTOP" ? `laptop-${item.serialNumber}` : `accessory-${item.accessoryId}`
 }
 
 export type PaymentMethod = "CASH" | "CARD" | "TRANSFER"
@@ -64,7 +99,7 @@ type ActiveDiscount = {
   value: number
 }
 
-type PendingItem = InventoryLookupResult & {
+type PendingItem = Extract<ScanResult, { kind: "LAPTOP" }> & {
   confirmedRam: string
   confirmedStorage: string
 }
@@ -110,6 +145,30 @@ export function POSClient({
     managerPassword: "",
   })
 
+  // ── Loyalty / customer state ──────────────────────────────────────────────
+  const [customer, setCustomer] = useState<CustomerSummary | null>(null)
+  const [customerPhoneInput, setCustomerPhoneInput] = useState("")
+  const [isLookingUpCustomer, setIsLookingUpCustomer] = useState(false)
+  const [redeemPointsInput, setRedeemPointsInput] = useState("")
+  const [registerDialogOpen, setRegisterDialogOpen] = useState(false)
+  const [registerForm, setRegisterForm] = useState({
+    name: "",
+    phone: "",
+    whatsappOptIn: true,
+  })
+
+  // ── Return / warranty triage ─────────────────────────────────────────────
+  const [triageItem, setTriageItem] = useState<Extract<ScanResult, { kind: "LAPTOP" }> | null>(null)
+  const [triageMode, setTriageMode] = useState<"choose" | "checklist">("choose")
+  const [warrantyChecklist, setWarrantyChecklist] = useState({
+    stickerPresent: false,
+    ramHddMatches: false,
+    chargerReturned: false,
+    freeGiftsReturned: false,
+  })
+  const [isSubmittingTriage, setIsSubmittingTriage] = useState(false)
+  const [warrantySlip, setWarrantySlip] = useState<Awaited<ReturnType<typeof createWarrantyClaim>> | null>(null)
+
   const scanInputRef = useRef<HTMLInputElement>(null)
 
   const focusScanner = useCallback(() => {
@@ -120,51 +179,116 @@ export function POSClient({
     if (!pendingItem) focusScanner()
   }, [cart, pendingItem, focusScanner])
 
+  // Clear the printed warranty slip once the print dialog closes, so it
+  // doesn't linger in the DOM and get reprinted alongside an unrelated sale.
+  useEffect(() => {
+    if (!warrantySlip) return
+    const clear = () => setWarrantySlip(null)
+    window.addEventListener("afterprint", clear)
+    return () => window.removeEventListener("afterprint", clear)
+  }, [warrantySlip])
+
   // ── Scan handler ────────────────────────────────────────────────────────────
+  // A laptop's serial number and an accessory's barcode are both just
+  // "whatever the scanner typed" — scanBarcode checks both and tells us which
+  // kind of item we're holding. Laptops get the existing spec-confirmation
+  // dialog; accessories are quantity-based, so a repeat scan just bumps +1.
   const handleScan = useCallback(
     async (raw: string) => {
-      const sn = raw.trim()
-      if (!sn) return
-
-      if (cart.some((c) => c.serialNumber === sn)) {
-        toast.warning("Already in cart", {
-          description: `Serial ${sn} is already on this order.`,
-        })
-        return
-      }
+      const code = raw.trim()
+      if (!code) return
 
       setIsLookingUp(true)
       try {
-        const item = await lookupInventoryItem(sn)
+        const result = await scanBarcode(code)
 
-        if (!item) {
+        if (result.kind === "NOT_FOUND") {
           toast.error("Not found", {
-            description: `Serial "${sn}" does not exist in inventory.`,
-          })
-          return
-        }
-        if (item.status !== "AVAILABLE") {
-          const messages: Record<string, string> = {
-            SOLD: "has already been sold",
-            RETURNED: "is marked RETURNED",
-            PENDING_APPROVAL: "is awaiting admin approval and isn't sellable yet",
-            REJECTED: "was rejected during approval and isn't sellable",
-          }
-          toast.error("Not available for sale", {
-            description: `"${item.modelName}" (${sn}) ${
-              messages[item.status] ?? `has status ${item.status}`
-            }.`,
-            duration: 6000,
-            icon: <AlertTriangle className="h-4 w-4 text-red-500" />,
+            description: `"${code}" does not exist in inventory.`,
           })
           return
         }
 
-        setPendingItem({
-          ...item,
-          confirmedRam: item.ram,
-          confirmedStorage: item.storage,
-        })
+        if (result.kind === "LAPTOP") {
+          if (cart.some((c) => c.kind === "LAPTOP" && c.serialNumber === result.serialNumber)) {
+            toast.warning("Already in cart", {
+              description: `Serial ${result.serialNumber} is already on this order.`,
+            })
+            return
+          }
+          if (result.status === "SOLD") {
+            // A previously-sold serial coming back in — this is a return,
+            // not a sale. Ask staff what's actually happening before doing
+            // anything with it.
+            setTriageItem(result)
+            return
+          }
+          if (result.status !== "AVAILABLE") {
+            const messages: Record<string, string> = {
+              RETURNED: "is marked RETURNED",
+              PENDING_APPROVAL: "is awaiting admin approval and isn't sellable yet",
+              REJECTED: "was rejected during approval and isn't sellable",
+              OUT_FOR_REPAIR: "is currently out for repair",
+              IN_WARRANTY: "is currently in the warranty lane",
+            }
+            toast.error("Not available for sale", {
+              description: `"${result.modelName}" (${result.serialNumber}) ${
+                messages[result.status] ?? `has status ${result.status}`
+              }.`,
+              duration: 6000,
+              icon: <AlertTriangle className="h-4 w-4 text-red-500" />,
+            })
+            return
+          }
+
+          setPendingItem({
+            ...result,
+            confirmedRam: result.ram,
+            confirmedStorage: result.storage,
+          })
+          return
+        }
+
+        // ── ACCESSORY ──
+        if (result.quantityInStock <= 0) {
+          toast.error("Out of stock", {
+            description: `"${result.name}" has no stock available.`,
+          })
+          return
+        }
+
+        const existing = cart.find(
+          (c): c is AccessoryCartItem => c.kind === "ACCESSORY" && c.accessoryId === result.accessoryId
+        )
+        if (existing) {
+          if (existing.quantity >= result.quantityInStock) {
+            toast.warning("At max stock", {
+              description: `Only ${result.quantityInStock} of "${result.name}" in stock.`,
+            })
+            return
+          }
+          setCart((prev) =>
+            prev.map((c) =>
+              c.kind === "ACCESSORY" && c.accessoryId === result.accessoryId
+                ? { ...c, quantity: c.quantity + 1 }
+                : c
+            )
+          )
+        } else {
+          setCart((prev) => [
+            ...prev,
+            {
+              kind: "ACCESSORY",
+              accessoryId: result.accessoryId,
+              barcode: result.barcode,
+              name: result.name,
+              sellingPrice: result.sellingPrice,
+              quantity: 1,
+              quantityInStock: result.quantityInStock,
+            },
+          ])
+        }
+        toast.success("Added to cart", { description: result.name })
       } catch {
         toast.error("Lookup failed", {
           description: "Could not reach the server. Check your connection.",
@@ -199,6 +323,7 @@ export function POSClient({
     setCart((prev) => [
       ...prev,
       {
+        kind: "LAPTOP",
         serialNumber: pendingItem.serialNumber,
         modelName: pendingItem.modelName,
         processor: pendingItem.processor,
@@ -217,8 +342,72 @@ export function POSClient({
     focusScanner()
   }
 
-  const removeFromCart = (sn: string) => {
-    setCart((prev) => prev.filter((c) => c.serialNumber !== sn))
+  // ── Return / warranty triage ─────────────────────────────────────────────
+  const cancelTriage = () => {
+    setTriageItem(null)
+    setTriageMode("choose")
+    setWarrantyChecklist({
+      stickerPresent: false,
+      ramHddMatches: false,
+      chargerReturned: false,
+      freeGiftsReturned: false,
+    })
+    focusScanner()
+  }
+
+  // Only "Warranty Claim" has a built workflow — the rest are recorded for
+  // reference so staff isn't left with no way to log what they saw.
+  const handleTriageOutcome = async (outcome: "RETURN" | "REPLACEMENT" | "BUY_BACK" | "TRADE_IN") => {
+    if (!triageItem) return
+    try {
+      await recordReturnTriage({ serialNumber: triageItem.serialNumber, outcome })
+      toast.info("Recorded", {
+        description: `${outcome.replace("_", " ")} noted for ${triageItem.serialNumber} — this flow isn't built yet, so no other action was taken.`,
+        duration: 6000,
+      })
+    } catch {
+      toast.error("Failed to record")
+    } finally {
+      cancelTriage()
+    }
+  }
+
+  const handleWarrantyClaimSubmit = async () => {
+    if (!triageItem) return
+    setIsSubmittingTriage(true)
+    try {
+      const claim = await createWarrantyClaim({
+        serialNumber: triageItem.serialNumber,
+        ...warrantyChecklist,
+      })
+      setWarrantySlip(claim)
+      printAtSize("80mm auto")
+      toast.success("Warranty claim received", { description: triageItem.modelName })
+      cancelTriage()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to receive warranty claim")
+    } finally {
+      setIsSubmittingTriage(false)
+    }
+  }
+
+  const removeFromCart = (item: CartItem) => {
+    setCart((prev) => prev.filter((c) => cartItemKey(c) !== cartItemKey(item)))
+  }
+
+  // +1 / -1 stepper for accessory lines — dropping to 0 removes the line.
+  const adjustAccessoryQty = (accessoryId: string, delta: number) => {
+    setCart((prev) => {
+      const idx = prev.findIndex((c) => c.kind === "ACCESSORY" && c.accessoryId === accessoryId)
+      if (idx === -1) return prev
+      const item = prev[idx] as AccessoryCartItem
+      const nextQty = item.quantity + delta
+      if (nextQty <= 0) return prev.filter((_, i) => i !== idx)
+      if (nextQty > item.quantityInStock) return prev
+      const next = [...prev]
+      next[idx] = { ...item, quantity: nextQty }
+      return next
+    })
   }
 
   // ── Totals ──────────────────────────────────────────────────────────────────
@@ -234,11 +423,24 @@ export function POSClient({
     ? `Manager Override — ${managerOverride.reason}`
     : selectedCampaign?.name
 
-  const subtotal = cart.reduce((sum, item) => sum + item.retailPrice, 0)
-  const { discountAmount, tax, total } = calculateOrderTotals(
-    subtotal,
-    discountSource
+  const subtotal = cart.reduce(
+    (sum, item) =>
+      sum + (item.kind === "LAPTOP" ? item.retailPrice : item.sellingPrice * item.quantity),
+    0
   )
+  const redeemPoints = Math.min(
+    parseInt(redeemPointsInput, 10) || 0,
+    customer?.points ?? 0
+  )
+  const { discountAmount, redemptionAmount, tax, total } = calculateOrderTotals(
+    subtotal,
+    discountSource,
+    redeemPoints > 0 ? pointsToValue(redeemPoints) : 0
+  )
+  const pointsEarnedPreview = customer ? calculatePointsEarned(total) : null
+  const newPointsBalancePreview = customer
+    ? customer.points + (pointsEarnedPreview ?? 0) - redeemPoints
+    : null
 
   // ── Manager override dialog ────────────────────────────────────────────────
   const handleApplyOverride = (e: React.FormEvent) => {
@@ -271,6 +473,60 @@ export function POSClient({
 
   const removeOverride = () => setManagerOverride(null)
 
+  // ── Loyalty / customer ──────────────────────────────────────────────────────
+  const handleFindCustomer = async () => {
+    const phone = customerPhoneInput.trim()
+    if (!phone) return
+    setIsLookingUpCustomer(true)
+    try {
+      const found = await lookupCustomerByPhone(phone)
+      if (found) {
+        setCustomer(found)
+        setCustomerPhoneInput("")
+        toast.success("Customer found", {
+          description: `${found.name} · ${found.points} points`,
+        })
+      } else {
+        toast.warning("No customer with that number", {
+          description: "Register them instead?",
+        })
+        setRegisterForm((f) => ({ ...f, phone }))
+        setRegisterDialogOpen(true)
+      }
+    } catch {
+      toast.error("Lookup failed", { description: "Could not reach the server." })
+    } finally {
+      setIsLookingUpCustomer(false)
+    }
+  }
+
+  const handleRegisterCustomer = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!registerForm.name.trim() || !registerForm.phone.trim()) {
+      toast.error("Name and phone are required")
+      return
+    }
+    try {
+      const created = await registerCustomer({
+        name: registerForm.name.trim(),
+        phone: registerForm.phone.trim(),
+        whatsappOptIn: registerForm.whatsappOptIn,
+      })
+      setCustomer(created)
+      setRegisterDialogOpen(false)
+      setRegisterForm({ name: "", phone: "", whatsappOptIn: true })
+      toast.success("Customer registered", { description: created.name })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Registration failed."
+      toast.error("Could not register customer", { description: msg })
+    }
+  }
+
+  const detachCustomer = () => {
+    setCustomer(null)
+    setRedeemPointsInput("")
+  }
+
   // ── Checkout ─────────────────────────────────────────────────────────────────
   const handleCheckout = async () => {
     if (cart.length === 0) return
@@ -281,11 +537,22 @@ export function POSClient({
         appliedDiscountId:
           appliedDiscountId !== "none" && !managerOverride ? appliedDiscountId : undefined,
         managerOverride: managerOverride ?? undefined,
-        items: cart.map((item) => ({
-          serialNumber: item.serialNumber,
-          confirmedRam: item.confirmedRam,
-          confirmedStorage: item.confirmedStorage,
-        })),
+        customerId: customer?.id,
+        redeemPoints: redeemPoints > 0 ? redeemPoints : undefined,
+        items: cart.map((item) =>
+          item.kind === "LAPTOP"
+            ? {
+                type: "LAPTOP" as const,
+                serialNumber: item.serialNumber,
+                confirmedRam: item.confirmedRam,
+                confirmedStorage: item.confirmedStorage,
+              }
+            : {
+                type: "ACCESSORY" as const,
+                accessoryId: item.accessoryId,
+                quantity: item.quantity,
+              }
+        ),
       })
 
       printAtSize("80mm auto")
@@ -294,8 +561,12 @@ export function POSClient({
       setAppliedDiscountId("none")
       setManagerOverride(null)
       setPaymentMethod("CASH")
+      setCustomer(null)
+      setRedeemPointsInput("")
       toast.success("Transaction complete", {
-        description: `Order #${result.orderId.slice(-8).toUpperCase()} · ${formatCurrency(result.total)} · ${paymentMethod}`,
+        description: `Order #${result.orderId.slice(-8).toUpperCase()} · ${formatCurrency(result.total)} · ${paymentMethod}${
+          result.pointsEarned ? ` · +${result.pointsEarned} pts` : ""
+        }`,
         duration: 7000,
       })
     } catch (err) {
@@ -329,13 +600,25 @@ export function POSClient({
 
           {/* Header bar */}
           <header className="flex items-center justify-between px-6 py-3 bg-white border-b border-slate-200 shadow-sm shrink-0">
-            <div className="h-8 w-40 relative">
-              <Image
-                src="/images/logo.png"
-                alt="TechRevalo"
-                fill
-                className="object-contain object-left"
-              />
+            <div className="flex items-center gap-2">
+              <div className="h-8 w-40 relative">
+                <Image
+                  src="/images/logo.png"
+                  alt="TechRevalo"
+                  fill
+                  className="object-contain object-left"
+                />
+              </div>
+              <PageHelp title="POS Terminal">
+                <p>The cashier checkout screen — scan items, confirm specs, apply discounts/loyalty, and take payment.</p>
+                <ul>
+                  <li>Scan a laptop&apos;s serial or an accessory&apos;s barcode into the box at the top — both go through the same scanner.</li>
+                  <li>A laptop opens a <strong>spec confirmation dialog</strong>: Model/CPU/GPU are locked, RAM/Storage are editable if the unit was reconfigured since intake.</li>
+                  <li>Scanning a serial that&apos;s <strong>already sold</strong> opens a return-triage prompt instead — pick Warranty Claim to receive it, or one of the other four options which just get logged for reference.</li>
+                  <li><strong>Customer</strong> box — find or register a loyalty member, redeem their points, and points earned show live before checkout.</li>
+                  <li>The PAY button color follows the payment method: green (Cash), blue (Card), violet (Transfer).</li>
+                </ul>
+              </PageHelp>
             </div>
             <div
               className={cn(
@@ -387,53 +670,107 @@ export function POSClient({
               </div>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-                {cart.map((item) => (
-                  <div
-                    key={item.serialNumber}
-                    className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col justify-between shadow-sm hover:shadow-md hover:border-primary/30 transition-all duration-200 group"
-                  >
-                    <div>
-                      <div className="flex items-start justify-between gap-2 mb-3">
-                        <h3 className="font-bold text-slate-900 text-base leading-snug">
-                          {item.modelName}
-                        </h3>
-                        <span className="text-[10px] font-mono bg-slate-100 text-slate-500 px-2 py-0.5 rounded shrink-0">
-                          {item.serialNumber}
-                        </span>
-                      </div>
-                      <div className="space-y-1.5 text-sm text-slate-500">
-                        <div className="flex items-center gap-2">
-                          <Cpu className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                          <span>{item.processor}</span>
-                        </div>
-                        {item.gpu && (
-                          <div className="flex items-center gap-2">
-                            <Tag className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                            <span>{item.gpu}</span>
-                          </div>
-                        )}
-                        <div className="flex items-center gap-2">
-                          <Database className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                          <span>
-                            {item.confirmedRam} · {item.confirmedStorage}
+                {cart.map((item) =>
+                  item.kind === "LAPTOP" ? (
+                    <div
+                      key={cartItemKey(item)}
+                      className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col justify-between shadow-sm hover:shadow-md hover:border-primary/30 transition-all duration-200 group"
+                    >
+                      <div>
+                        <div className="flex items-start justify-between gap-2 mb-3">
+                          <h3 className="font-bold text-slate-900 text-base leading-snug">
+                            {item.modelName}
+                          </h3>
+                          <span className="text-[10px] font-mono bg-slate-100 text-slate-500 px-2 py-0.5 rounded shrink-0">
+                            {item.serialNumber}
                           </span>
                         </div>
+                        <div className="space-y-1.5 text-sm text-slate-500">
+                          <div className="flex items-center gap-2">
+                            <Cpu className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                            <span>{item.processor}</span>
+                          </div>
+                          {item.gpu && (
+                            <div className="flex items-center gap-2">
+                              <Tag className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                              <span>{item.gpu}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2">
+                            <Database className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                            <span>
+                              {item.confirmedRam} · {item.confirmedStorage}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-100">
+                        <span className="text-xl font-black text-primary tracking-tight">
+                          {formatCurrency(item.retailPrice)}
+                        </span>
+                        <button
+                          onClick={() => removeFromCart(item)}
+                          className="p-2 rounded-xl text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                          aria-label={`Remove ${item.modelName}`}
+                        >
+                          <Trash2 className="h-5 w-5" />
+                        </button>
                       </div>
                     </div>
-                    <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-100">
-                      <span className="text-xl font-black text-primary tracking-tight">
-                        {formatCurrency(item.retailPrice)}
-                      </span>
-                      <button
-                        onClick={() => removeFromCart(item.serialNumber)}
-                        className="p-2 rounded-xl text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
-                        aria-label={`Remove ${item.modelName}`}
-                      >
-                        <Trash2 className="h-5 w-5" />
-                      </button>
+                  ) : (
+                    <div
+                      key={cartItemKey(item)}
+                      className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col justify-between shadow-sm hover:shadow-md hover:border-primary/30 transition-all duration-200 group"
+                    >
+                      <div>
+                        <div className="flex items-start justify-between gap-2 mb-3">
+                          <h3 className="font-bold text-slate-900 text-base leading-snug">
+                            {item.name}
+                          </h3>
+                          <span className="text-[10px] font-mono bg-slate-100 text-slate-500 px-2 py-0.5 rounded shrink-0">
+                            {item.barcode}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 text-sm text-slate-500">
+                          <Package className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                          <span>{formatCurrency(item.sellingPrice)} each</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-100">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => adjustAccessoryQty(item.accessoryId, -1)}
+                            className="h-7 w-7 flex items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
+                            aria-label={`Decrease quantity of ${item.name}`}
+                          >
+                            <Minus className="h-3.5 w-3.5" />
+                          </button>
+                          <span className="w-6 text-center text-sm font-bold text-slate-800">
+                            {item.quantity}
+                          </span>
+                          <button
+                            onClick={() => adjustAccessoryQty(item.accessoryId, 1)}
+                            disabled={item.quantity >= item.quantityInStock}
+                            className="h-7 w-7 flex items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-30 disabled:hover:bg-transparent"
+                            aria-label={`Increase quantity of ${item.name}`}
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <span className="text-xl font-black text-primary tracking-tight">
+                          {formatCurrency(item.sellingPrice * item.quantity)}
+                        </span>
+                        <button
+                          onClick={() => removeFromCart(item)}
+                          className="p-2 rounded-xl text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                          aria-label={`Remove ${item.name}`}
+                        >
+                          <Trash2 className="h-5 w-5" />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                )}
               </div>
             )}
           </div>
@@ -466,23 +803,44 @@ export function POSClient({
               <div className="divide-y divide-slate-50 px-6">
                 {cart.map((item) => (
                   <div
-                    key={item.serialNumber}
+                    key={cartItemKey(item)}
                     className="py-4 flex items-start justify-between gap-3"
                   >
-                    <div className="min-w-0">
-                      <p className="font-semibold text-slate-900 text-sm leading-snug">
-                        {item.modelName}
-                      </p>
-                      <p className="text-[11px] font-mono text-slate-400 mt-0.5">
-                        {item.serialNumber}
-                      </p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        {item.confirmedRam} / {item.confirmedStorage}
-                      </p>
-                    </div>
-                    <span className="font-bold text-slate-800 text-sm whitespace-nowrap">
-                      {formatCurrency(item.retailPrice)}
-                    </span>
+                    {item.kind === "LAPTOP" ? (
+                      <>
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-900 text-sm leading-snug">
+                            {item.modelName}
+                          </p>
+                          <p className="text-[11px] font-mono text-slate-400 mt-0.5">
+                            {item.serialNumber}
+                          </p>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            {item.confirmedRam} / {item.confirmedStorage}
+                          </p>
+                        </div>
+                        <span className="font-bold text-slate-800 text-sm whitespace-nowrap">
+                          {formatCurrency(item.retailPrice)}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-900 text-sm leading-snug">
+                            {item.name}
+                          </p>
+                          <p className="text-[11px] font-mono text-slate-400 mt-0.5">
+                            {item.barcode}
+                          </p>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            {item.quantity} × {formatCurrency(item.sellingPrice)}
+                          </p>
+                        </div>
+                        <span className="font-bold text-slate-800 text-sm whitespace-nowrap">
+                          {formatCurrency(item.sellingPrice * item.quantity)}
+                        </span>
+                      </>
+                    )}
                   </div>
                 ))}
               </div>
@@ -491,6 +849,77 @@ export function POSClient({
 
           {/* Totals + checkout */}
           <div className="border-t border-slate-100 p-6 space-y-4 shrink-0 bg-slate-50/60">
+
+            {/* Customer / loyalty */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold uppercase tracking-widest text-slate-400">
+                Customer
+              </label>
+              {customer ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-slate-800 truncate">{customer.name}</p>
+                      <p className="text-[11px] text-slate-500">{customer.phone} · {customer.points} pts</p>
+                    </div>
+                    <button
+                      onClick={detachCustomer}
+                      className="p-1.5 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
+                      aria-label="Remove customer"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                  {customer.points > 0 && (
+                    <div className="flex items-center gap-2">
+                      <Gift className="h-4 w-4 text-slate-400 shrink-0" />
+                      <Input
+                        type="number"
+                        min="0"
+                        max={customer.points}
+                        value={redeemPointsInput}
+                        onChange={(e) => setRedeemPointsInput(e.target.value)}
+                        placeholder="Points to redeem"
+                        className="h-9 text-sm"
+                      />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <Input
+                    value={customerPhoneInput}
+                    onChange={(e) => setCustomerPhoneInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault()
+                        handleFindCustomer()
+                      }
+                    }}
+                    placeholder="Customer phone number"
+                    className="h-9 text-sm"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-9 px-3 shrink-0"
+                    onClick={handleFindCustomer}
+                    disabled={isLookingUpCustomer || !customerPhoneInput.trim()}
+                  >
+                    {isLookingUpCustomer ? <Loader2 className="h-4 w-4 animate-spin" /> : "Find"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-9 px-3 shrink-0"
+                    onClick={() => setRegisterDialogOpen(true)}
+                    aria-label="Register new customer"
+                  >
+                    <UserPlus className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+            </div>
 
             {/* Discount selector */}
             {activeDiscounts.length > 0 && (
@@ -577,10 +1006,22 @@ export function POSClient({
                   <span>− {formatCurrency(discountAmount)}</span>
                 </div>
               )}
+              {redemptionAmount > 0 && (
+                <div className="flex justify-between text-emerald-600 font-semibold">
+                  <span>Points redeemed ({redeemPoints} pts)</span>
+                  <span>− {formatCurrency(redemptionAmount)}</span>
+                </div>
+              )}
               <div className="flex justify-between text-slate-500">
                 <span>GST (18%)</span>
                 <span>{formatCurrency(tax)}</span>
               </div>
+              {pointsEarnedPreview !== null && (
+                <div className="flex justify-between text-primary font-semibold">
+                  <span>Points earned this sale</span>
+                  <span>+{pointsEarnedPreview} pts</span>
+                </div>
+              )}
             </div>
 
             <div className="border-t border-slate-200" />
@@ -780,6 +1221,93 @@ export function POSClient({
         </DialogContent>
       </Dialog>
 
+      {/* ══ RETURN / WARRANTY TRIAGE DIALOG ══ */}
+      <Dialog open={!!triageItem} onOpenChange={(open) => !open && cancelTriage()}>
+        <DialogContent className="sm:max-w-[460px]">
+          {triageMode === "choose" ? (
+            <>
+              <DialogHeader>
+                <DialogTitle className="text-xl">Item Returning</DialogTitle>
+                <p className="text-sm text-slate-500 mt-1 leading-relaxed">
+                  <strong>{triageItem?.modelName}</strong> ({triageItem?.serialNumber}) was already sold.
+                  What&apos;s happening with it?
+                </p>
+              </DialogHeader>
+              <div className="grid grid-cols-1 gap-2 py-1">
+                <Button
+                  onClick={() => setTriageMode("checklist")}
+                  className="justify-start h-12 bg-primary hover:bg-primary/90"
+                >
+                  <ShieldAlert className="w-4 h-4 mr-2" /> Warranty Claim
+                </Button>
+                <Button variant="outline" className="justify-start h-11" onClick={() => handleTriageOutcome("RETURN")}>
+                  <RotateCcw className="w-4 h-4 mr-2" /> Return
+                </Button>
+                <Button variant="outline" className="justify-start h-11" onClick={() => handleTriageOutcome("REPLACEMENT")}>
+                  <Repeat className="w-4 h-4 mr-2" /> Replacement
+                </Button>
+                <Button variant="outline" className="justify-start h-11" onClick={() => handleTriageOutcome("BUY_BACK")}>
+                  <HandCoins className="w-4 h-4 mr-2" /> Buy-back
+                </Button>
+                <Button variant="outline" className="justify-start h-11" onClick={() => handleTriageOutcome("TRADE_IN")}>
+                  <ArrowLeftRight className="w-4 h-4 mr-2" /> Trade-in
+                </Button>
+              </div>
+              <DialogFooter>
+                <Button variant="ghost" onClick={cancelTriage} className="w-full">
+                  Cancel
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle className="text-xl flex items-center gap-2">
+                  <ClipboardCheck className="w-5 h-5 text-primary" /> Receiving Checklist
+                </DialogTitle>
+                <p className="text-sm text-slate-500 mt-1 leading-relaxed">
+                  {triageItem?.modelName} ({triageItem?.serialNumber})
+                </p>
+              </DialogHeader>
+              <div className="space-y-3 py-1">
+                {(
+                  [
+                    ["stickerPresent", "Warranty sticker present?"],
+                    ["ramHddMatches", "RAM/HDD matches what was sold?"],
+                    ["chargerReturned", "Charger returned?"],
+                    ["freeGiftsReturned", "Free gifts returned?"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label
+                    key={key}
+                    className="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3 cursor-pointer"
+                  >
+                    <span className="text-sm font-medium text-slate-700">{label}</span>
+                    <input
+                      type="checkbox"
+                      checked={warrantyChecklist[key]}
+                      onChange={(e) =>
+                        setWarrantyChecklist((prev) => ({ ...prev, [key]: e.target.checked }))
+                      }
+                      className="h-5 w-5 rounded border-slate-300"
+                    />
+                  </label>
+                ))}
+              </div>
+              <DialogFooter className="gap-2 pt-2">
+                <Button variant="outline" onClick={() => setTriageMode("choose")} className="flex-1">
+                  Back
+                </Button>
+                <Button onClick={handleWarrantyClaimSubmit} disabled={isSubmittingTriage} className="flex-1">
+                  {isSubmittingTriage ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ShieldAlert className="w-4 h-4 mr-2" />}
+                  Receive &amp; Print Slip
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* ══ MANAGER OVERRIDE DIALOG ══ */}
       <Dialog open={overrideDialogOpen} onOpenChange={setOverrideDialogOpen}>
         <DialogContent className="sm:max-w-[420px]">
@@ -877,16 +1405,83 @@ export function POSClient({
         </DialogContent>
       </Dialog>
 
+      {/* ══ REGISTER CUSTOMER DIALOG ══ */}
+      <Dialog open={registerDialogOpen} onOpenChange={setRegisterDialogOpen}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="text-xl">Register Customer</DialogTitle>
+            <p className="text-sm text-slate-500 mt-1 leading-relaxed">
+              Enrolls the customer in the loyalty program — they&apos;ll earn points on this
+              purchase and every one after it.
+            </p>
+          </DialogHeader>
+
+          <form onSubmit={handleRegisterCustomer} className="space-y-4 py-1">
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                Name
+              </label>
+              <Input
+                value={registerForm.name}
+                onChange={(e) => setRegisterForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="Customer name"
+                autoFocus
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                Phone number
+              </label>
+              <Input
+                value={registerForm.phone}
+                onChange={(e) => setRegisterForm((f) => ({ ...f, phone: e.target.value }))}
+                placeholder="e.g. 0123456789"
+              />
+            </div>
+            <label className="flex items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={registerForm.whatsappOptIn}
+                onChange={(e) => setRegisterForm((f) => ({ ...f, whatsappOptIn: e.target.checked }))}
+                className="h-4 w-4 rounded border-slate-300"
+              />
+              Send WhatsApp updates (registration &amp; purchase notifications)
+            </label>
+
+            <DialogFooter className="gap-2 pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setRegisterDialogOpen(false)}
+                className="flex-1"
+              >
+                Cancel
+              </Button>
+              <Button type="submit" className="flex-1 bg-primary hover:bg-primary/90 font-bold">
+                <UserPlus className="w-4 h-4 mr-2" />
+                Register
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       {/* ══ THERMAL RECEIPT (print only) ══ */}
       <ThermalReceipt
         cart={cart}
         subtotal={subtotal}
         discountAmount={discountAmount}
         discountName={discountLabel}
+        redemptionAmount={redemptionAmount}
+        redeemedPoints={redeemPoints}
         tax={tax}
         total={total}
         paymentMethod={paymentMethod}
+        customerName={customer?.name}
+        pointsEarned={pointsEarnedPreview ?? undefined}
+        newPointsBalance={newPointsBalancePreview ?? undefined}
       />
+      <WarrantyClaimSlip claim={warrantySlip} />
     </>
   )
 }

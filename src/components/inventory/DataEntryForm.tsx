@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner"
 import Barcode from "react-barcode"
 import { Printer } from "lucide-react"
-import { printAtSize } from "@/lib/print"
+import { printElementAtSize } from "@/lib/print"
 
 export function DataEntryForm() {
   const [loading, setLoading] = useState(false)
@@ -55,8 +55,15 @@ export function DataEntryForm() {
   }
 
   const handlePrint = () => {
-    printAtSize("50mm 25mm")
-    setGeneratedBarcode(null)
+    const label = document.querySelector<HTMLElement>(".barcode-sticker-container")
+    if (!label) {
+      toast.error("Barcode label is not ready yet")
+      return
+    }
+    printElementAtSize(label, "50mm 25mm", {
+      bodyClass: "print-barcode-label",
+      title: generatedBarcode ?? "Barcode Label",
+    })
   }
 
   if (generatedBarcode) {
@@ -89,12 +96,12 @@ export function DataEntryForm() {
         </CardContent>
 
         {/* 50 × 25 mm barcode sticker — print-only */}
-        <div className="barcode-sticker-container hidden print:flex absolute top-0 left-0 w-[50mm] h-[25mm] items-center justify-center bg-white text-black p-1">
+        <div className="barcode-sticker-container hidden w-[50mm] h-[25mm] flex-col items-center justify-center bg-white text-black p-1">
           <Barcode
             value={generatedBarcode}
-            width={1.2}
-            height={30}
-            fontSize={10}
+            width={1.15}
+            height={28}
+            fontSize={9}
             margin={0}
           />
         </div>

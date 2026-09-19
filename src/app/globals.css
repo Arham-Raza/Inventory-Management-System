@@ -141,3 +141,38 @@
     @apply bg-background text-foreground;
   }
 }
+
+@media print {
+  body.print-barcode-label {
+    width: 50mm !important;
+    height: 25mm !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+    background: white !important;
+  }
+
+  body.print-barcode-label > *:not([data-print-root="barcode-label"]) {
+    display: none !important;
+  }
+
+  body.print-barcode-label [data-print-root="barcode-label"] {
+    display: flex !important;
+    position: fixed !important;
+    inset: 0 auto auto 0 !important;
+    width: 50mm !important;
+    height: 25mm !important;
+    margin: 0 !important;
+    padding: 1.5mm !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: white !important;
+    color: black !important;
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+  }
+
+  body.print-barcode-label [data-print-root="barcode-label"] svg {
+    max-width: 47mm !important;
+    max-height: 22mm !important;
+  }
+}

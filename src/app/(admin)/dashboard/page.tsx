@@ -18,6 +18,7 @@ import {
 } from "lucide-react"
 import { formatCurrency } from "@/lib/money"
 import { auth } from "@/auth"
+import { PageHelp } from "@/components/layout/PageHelp"
 
 export default async function DashboardPage() {
   const [stats, session] = await Promise.all([getDashboardStats(), auth()])
@@ -38,9 +39,24 @@ export default async function DashboardPage() {
       {/* ── Page header ── */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight text-slate-900">
-            {greeting}, {session?.user?.name?.split(" ")[0] ?? "there"}
-          </h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-3xl font-bold tracking-tight text-slate-900">
+              {greeting}, {session?.user?.name?.split(" ")[0] ?? "there"}
+            </h1>
+            <PageHelp title="Dashboard">
+              <p>
+                A single at-a-glance view of how the shop is doing — nothing
+                on this page is editable, it&apos;s all pulled from other
+                modules.
+              </p>
+              <ul>
+                <li><strong>Today&apos;s / Lifetime Revenue</strong> — total sale value from completed POS orders.</li>
+                <li><strong>Available Stock</strong> — laptops currently sellable (not sold, in repair, or in warranty).</li>
+                <li><strong>Stock Sold</strong> — the percentage of everything ever stocked in that has since sold.</li>
+                <li><strong>Recent Transactions</strong> — the last few completed sales, with cashier and any promo applied.</li>
+              </ul>
+            </PageHelp>
+          </div>
           <p className="text-slate-500 mt-1">
             {new Date().toLocaleDateString("en-MY", {
               weekday: "long",

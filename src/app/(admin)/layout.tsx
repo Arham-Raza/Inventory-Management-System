@@ -13,7 +13,9 @@ export default async function AdminLayout({
 
   const role = session.user?.role
   if (role === "CASHIER") redirect("/pos")
-  if (role === "DATA_ENTRY") redirect("/data-entry")
+  // DATA_ENTRY is allowed onto /component-prices (see src/proxy.ts) — the
+  // path-based decision belongs there, not in this layout, which has no
+  // pathname to check against.
 
   return (
     <div className="flex min-h-screen bg-gray-50">

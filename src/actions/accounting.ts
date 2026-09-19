@@ -12,6 +12,7 @@ export async function getAccountingStats() {
       items: {
         include: {
           inventoryItem: true,
+          accessory: true,
         },
       },
       discount: true,
@@ -29,6 +30,9 @@ export async function getAccountingStats() {
   const transactions = orders.map((order: OrderWithItems) => {
     const revenue = Number(order.totalAmount)
     const cogs = order.items.reduce((sum: number, item: OrderItem) => {
+      if (item.accessory) {
+        return sum + Number(item.accessory.costPrice ?? 0) * item.quantity
+      }
       return sum + Number(item.inventoryItem?.purchaseCost ?? 0)
     }, 0)
     const profit = revenue - cogs
@@ -39,7 +43,8 @@ export async function getAccountingStats() {
     return {
       id: order.id,
       date: order.createdAt,
-      itemsCount: order.items.length,
+      // Sum of units, not rows — an accessory row can represent several units.
+      itemsCount: order.items.reduce((sum: number, i: OrderItem) => sum + i.quantity, 0),
       // Serial + lot numbers of every unit in this order, so accounting can
       // reconcile this ledger row against the matching entry/entries in the
       // external accounting software.

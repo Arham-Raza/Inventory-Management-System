@@ -45,18 +45,32 @@ Requires MySQL. Relevant `.env` variables:
 | `(admin)` | Role-gated per route | Dashboard, Inventory, Data Entry, Accounting, Discounts, Employees |
 | `/dashboard`, `/inventory` | SUPER_ADMIN, MANAGER | KPIs and stock |
 | `/data-entry` | DATA_ENTRY only (redirect target for this role) | Inventory intake |
+| `/component-prices` | SUPER_ADMIN, MANAGER, DATA_ENTRY | The one exception to DATA_ENTRY's `/data-entry`-only lock — see `src/proxy.ts` |
 | `/accounting`, `/discounts`, `/employees` | SUPER_ADMIN only | MANAGER is redirected away |
 | `(pos)` | CASHIER (redirect target for this role) | POS terminal at `/pos` |
 | `/login` | Public | NextAuth credentials form |
 | `/api/auth/[...nextauth]` | Public | NextAuth handler |
 
-### Route Protection — Duplicate Files (Known Issue)
+### Route Protection
 
-There are **two** competing route-protection files:
-- `src/proxy.ts` — the active one. Next.js 16 renamed the `middleware` file convention to `proxy` (old convention is deprecated, see `node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/proxy.md`). Wraps `auth()` from `@/auth`, default-exported. Its matcher excludes `/api`.
-- `middleware.ts` (repo root) — a **stale leftover** from before the proxy migration. It reimplements the same RBAC logic independently using `getToken()` directly, with a different matcher (does *not* exclude `/api`) and slightly different allowed-path logic. It is very likely dead code under Next.js 16's `proxy` convention, but the two files have drifted and disagree on `/api` handling.
+`src/proxy.ts` is the single route-protection file. Next.js 16 renamed the
+`middleware` file convention to `proxy` (old convention is deprecated, see
+`node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/proxy.md`).
+Wraps `auth()` from `@/auth`, default-exported. Its matcher excludes `/api`.
 
-When touching auth/RBAC redirect logic, edit `src/proxy.ts` (the live file) and treat `middleware.ts` as suspect — verify whether it still executes before assuming both need updating, and consider flagging/removing it to stop future drift.
+There used to be a second, stale `middleware.ts` at the repo root reimplementing
+the same RBAC logic independently via `getToken()`, with a different matcher and
+slightly different allowed-path rules. It was assumed to be dead code under the
+`proxy` convention — it was not: it was still executing and silently overriding
+`proxy.ts` (caught when a DATA_ENTRY exception added to `proxy.ts` had no effect
+until `middleware.ts` was deleted). It has been removed. If page-level RBAC edits
+to `proxy.ts` ever appear to have no effect again, check for a live root-level
+`middleware.ts` before assuming the edit itself is wrong.
+
+Route-level access is enforced only by `proxy.ts` — `(admin)/layout.tsx` and
+`(data-entry)/layout.tsx` should stay limited to `if (!session) redirect("/login")`
+plus, at most, a CASHIER redirect; per-path role decisions belong in `proxy.ts`,
+which has the pathname to check against and layouts don't.
 
 ### Data Flow
 
@@ -71,7 +85,7 @@ Client Component → Server Action (auth() check → Prisma $transaction) → re
 | Path | Purpose |
 |---|---|
 | `src/auth.ts` | NextAuth config — credentials provider, JWT with role + id claims |
-| `src/proxy.ts` | Live route protection (see Duplicate Files note above) |
+| `src/proxy.ts` | Sole route-protection file (see Route Protection note above) |
 | `src/lib/prisma.ts` | Prisma singleton (dev HMR safe) |
 | `src/lib/money.ts` | Integer-based (paisa) financial math — discount, tax, total |
 | `src/actions/order.ts` | `createOrder` — full `$transaction`, concurrency guard, server-side pricing |

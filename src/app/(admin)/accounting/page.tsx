@@ -2,6 +2,7 @@ import { getAccountingStats } from "@/actions/accounting"
 import { AccountingTable } from "@/components/accounting/AccountingTable"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { DollarSign, TrendingUp, TrendingDown, Percent } from "lucide-react"
+import { PageHelp } from "@/components/layout/PageHelp"
 
 export default async function AccountingPage() {
   const stats = await getAccountingStats()
@@ -9,7 +10,18 @@ export default async function AccountingPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Accounting & Profitability</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-3xl font-bold tracking-tight">Accounting &amp; Profitability</h1>
+          <PageHelp title="Accounting & Profitability">
+            <p>SUPER_ADMIN only — a read-only financial view across every completed sale.</p>
+            <ul>
+              <li><strong>Revenue</strong> — total of what customers paid (after discounts, including tax).</li>
+              <li><strong>COGS</strong> — total purchase cost of the stock that was sold.</li>
+              <li><strong>Gross Profit</strong> — Revenue minus COGS; <strong>Margin</strong> is that as a percentage.</li>
+              <li>This doesn&apos;t yet include Repair Dispatch or Walk-in Repair spend/profit — those have their own ledgers on their respective pages.</li>
+            </ul>
+          </PageHelp>
+        </div>
         <p className="text-muted-foreground">Track revenue, cost of goods sold (COGS), and gross profit margins.</p>
       </div>
       

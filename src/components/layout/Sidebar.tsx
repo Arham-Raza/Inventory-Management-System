@@ -6,12 +6,19 @@ import { cn } from "@/lib/utils"
 import {
   LayoutDashboard,
   Package,
+  Boxes,
   Tags,
   LogOut,
   MonitorSmartphone,
   Calculator,
   UserCheck,
   ChevronRight,
+  Cpu,
+  Repeat,
+  Wrench,
+  ShieldCheck,
+  HardHat,
+  ClipboardCheck,
 } from "lucide-react"
 import { signOut } from "next-auth/react"
 import Image from "next/image"
@@ -37,6 +44,42 @@ const NAV_ITEMS: NavItem[] = [
     allowedRoles: ["SUPER_ADMIN", "MANAGER"],
   },
   {
+    href: "/stock-take",
+    label: "Stock-Take",
+    icon: ClipboardCheck,
+    allowedRoles: ["SUPER_ADMIN", "MANAGER"],
+  },
+  {
+    href: "/accessories",
+    label: "Accessories",
+    icon: Boxes,
+    allowedRoles: ["SUPER_ADMIN", "MANAGER"],
+  },
+  {
+    href: "/component-movements",
+    label: "Component Movements",
+    icon: Repeat,
+    allowedRoles: ["SUPER_ADMIN", "MANAGER"],
+  },
+  {
+    href: "/repair",
+    label: "Repair Dispatch",
+    icon: Wrench,
+    allowedRoles: ["SUPER_ADMIN", "MANAGER"],
+  },
+  {
+    href: "/warranty",
+    label: "Warranty / RMA",
+    icon: ShieldCheck,
+    allowedRoles: ["SUPER_ADMIN", "MANAGER"],
+  },
+  {
+    href: "/walkin-repairs",
+    label: "Walk-in Repairs",
+    icon: HardHat,
+    allowedRoles: ["SUPER_ADMIN", "MANAGER"],
+  },
+  {
     href: "/data-entry",
     label: "Receive Stock",
     icon: Tags,
@@ -53,6 +96,12 @@ const NAV_ITEMS: NavItem[] = [
     label: "Discounts",
     icon: Tags,
     allowedRoles: ["SUPER_ADMIN"],
+  },
+  {
+    href: "/component-prices",
+    label: "Component Prices",
+    icon: Cpu,
+    allowedRoles: ["SUPER_ADMIN", "MANAGER", "DATA_ENTRY"],
   },
   {
     href: "/employees",

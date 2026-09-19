@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/dialog"
 import { toast } from "sonner"
 import Barcode from "react-barcode"
-import { printAtSize } from "@/lib/print"
+import { printElementAtSize, printElementsAtSize } from "@/lib/print"
 import {
   CheckCircle,
   XCircle,
@@ -40,6 +40,8 @@ import {
   Ban,
   Search,
   Printer,
+  Wrench,
+  ShieldCheck,
 } from "lucide-react"
 
 type InventoryItem = Awaited<ReturnType<typeof getAllInventory>>[number]
@@ -51,6 +53,8 @@ const STATUS_OPTIONS = [
   { value: "SOLD", label: "Sold" },
   { value: "RETURNED", label: "Returned" },
   { value: "REJECTED", label: "Rejected" },
+  { value: "OUT_FOR_REPAIR", label: "Out for Repair" },
+  { value: "IN_WARRANTY", label: "In Warranty" },
 ]
 
 function StatusChip({ status }: { status: string }) {
@@ -60,6 +64,8 @@ function StatusChip({ status }: { status: string }) {
     SOLD: "bg-slate-100 text-slate-500 border-slate-200",
     PENDING_APPROVAL: "bg-blue-50 text-blue-700 border-blue-200",
     REJECTED: "bg-rose-50 text-rose-700 border-rose-200",
+    OUT_FOR_REPAIR: "bg-violet-50 text-violet-700 border-violet-200",
+    IN_WARRANTY: "bg-cyan-50 text-cyan-700 border-cyan-200",
   }
   const icons: Record<string, React.ReactNode> = {
     AVAILABLE: <CheckCircle className="h-3 w-3" />,
@@ -67,6 +73,8 @@ function StatusChip({ status }: { status: string }) {
     SOLD: <XCircle className="h-3 w-3" />,
     PENDING_APPROVAL: <Clock className="h-3 w-3" />,
     REJECTED: <Ban className="h-3 w-3" />,
+    OUT_FOR_REPAIR: <Wrench className="h-3 w-3" />,
+    IN_WARRANTY: <ShieldCheck className="h-3 w-3" />,
   }
   const labels: Record<string, string> = {
     AVAILABLE: "Available",
@@ -74,6 +82,8 @@ function StatusChip({ status }: { status: string }) {
     SOLD: "Sold",
     PENDING_APPROVAL: "Pending Approval",
     REJECTED: "Rejected",
+    OUT_FOR_REPAIR: "Out for Repair",
+    IN_WARRANTY: "In Warranty",
   }
 
   return (
@@ -153,7 +163,17 @@ function BarcodeLabelDialog({
   item: { serialNumber: string; modelName: string } | null
   onClose: () => void
 }) {
-  const handlePrint = () => printAtSize("50mm 25mm")
+  const handlePrint = () => {
+    const label = document.querySelector<HTMLElement>(".barcode-sticker-container")
+    if (!label) {
+      toast.error("Barcode label is not ready yet")
+      return
+    }
+    printElementAtSize(label, "50mm 25mm", {
+      bodyClass: "print-barcode-label",
+      title: item?.serialNumber ?? "Barcode Label",
+    })
+  }
 
   return (
     <Dialog open={!!item} onOpenChange={(open) => !open && onClose()}>
@@ -177,8 +197,11 @@ function BarcodeLabelDialog({
             </div>
 
             {/* 50 × 25 mm barcode sticker — print-only */}
-            <div className="barcode-sticker-container hidden print:flex absolute top-0 left-0 w-[50mm] h-[25mm] items-center justify-center bg-white text-black p-1">
-              <Barcode value={item.serialNumber} width={1.2} height={30} fontSize={10} margin={0} />
+            <div className="barcode-sticker-container hidden w-[50mm] h-[25mm] flex-col items-center justify-center bg-white text-black p-1">
+              <Barcode value={item.serialNumber} width={1.15} height={28} fontSize={9} margin={0} />
+              <div className="text-[7px] leading-none font-semibold max-w-[46mm] truncate mt-0.5">
+                {item.modelName}
+              </div>
             </div>
           </>
         )}
@@ -197,6 +220,8 @@ export function InventoryTable({
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("ALL")
   const [printItem, setPrintItem] = useState<{ serialNumber: string; modelName: string } | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [isBulkPrinting, setIsBulkPrinting] = useState(false)
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -210,6 +235,54 @@ export function InventoryTable({
       )
     })
   }, [items, search, statusFilter])
+
+  const selectedItems = useMemo(
+    () => filtered.filter((item) => selected.has(item.serialNumber)),
+    [filtered, selected]
+  )
+  const allFilteredSelected = filtered.length > 0 && filtered.every((i) => selected.has(i.serialNumber))
+
+  const toggleOne = (serialNumber: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(serialNumber)) next.delete(serialNumber)
+      else next.add(serialNumber)
+      return next
+    })
+  }
+
+  const toggleAllFiltered = () => {
+    setSelected((prev) => {
+      if (allFilteredSelected) {
+        const next = new Set(prev)
+        filtered.forEach((i) => next.delete(i.serialNumber))
+        return next
+      }
+      const next = new Set(prev)
+      filtered.forEach((i) => next.add(i.serialNumber))
+      return next
+    })
+  }
+
+  const handleBulkPrint = () => {
+    setIsBulkPrinting(true)
+    // Rendered (hidden) just below the table, one per selected item.
+    window.setTimeout(() => {
+      const labels = Array.from(
+        document.querySelectorAll<HTMLElement>(".bulk-barcode-label")
+      )
+      if (labels.length === 0) {
+        toast.error("Labels are not ready yet")
+        setIsBulkPrinting(false)
+        return
+      }
+      printElementsAtSize(labels, "50mm 25mm", {
+        bodyClass: "print-barcode-label",
+        title: `${labels.length} Barcode Labels`,
+      })
+      setIsBulkPrinting(false)
+    }, 50)
+  }
 
   return (
     <>
@@ -235,6 +308,17 @@ export function InventoryTable({
             ))}
           </SelectContent>
         </Select>
+        {selected.size > 0 && (
+          <Button
+            size="sm"
+            onClick={handleBulkPrint}
+            disabled={isBulkPrinting}
+            className="bg-primary text-primary-foreground"
+          >
+            <Printer className="w-3.5 h-3.5 mr-1.5" />
+            Print {selected.size} Label{selected.size > 1 ? "s" : ""}
+          </Button>
+        )}
         <p className="text-xs text-slate-400 self-center sm:ml-auto">
           {filtered.length} of {items.length} units
         </p>
@@ -243,7 +327,16 @@ export function InventoryTable({
       <Table>
         <TableHeader>
           <TableRow className="border-slate-100">
-            <TableHead className="pl-6 text-xs">Serial Number</TableHead>
+            <TableHead className="pl-6 w-8">
+              <input
+                type="checkbox"
+                checked={allFilteredSelected}
+                onChange={toggleAllFiltered}
+                aria-label="Select all"
+                className="h-4 w-4 rounded border-slate-300"
+              />
+            </TableHead>
+            <TableHead className="text-xs">Serial Number</TableHead>
             <TableHead className="text-xs">Lot / Ref #</TableHead>
             <TableHead className="text-xs">Model</TableHead>
             <TableHead className="text-xs">Processor</TableHead>
@@ -264,7 +357,7 @@ export function InventoryTable({
           {filtered.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={canApprove ? 12 : 11}
+                colSpan={canApprove ? 13 : 12}
                 className="text-center py-12 text-slate-400"
               >
                 {items.length === 0
@@ -278,7 +371,16 @@ export function InventoryTable({
                 key={item.serialNumber}
                 className="border-slate-100 hover:bg-slate-50/50"
               >
-                <TableCell className="pl-6 font-mono text-xs font-bold text-slate-700">
+                <TableCell className="pl-6">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(item.serialNumber)}
+                    onChange={() => toggleOne(item.serialNumber)}
+                    aria-label={`Select ${item.serialNumber}`}
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                </TableCell>
+                <TableCell className="font-mono text-xs font-bold text-slate-700">
                   {item.serialNumber}
                 </TableCell>
                 <TableCell className="font-mono text-xs text-slate-500">
@@ -349,6 +451,19 @@ export function InventoryTable({
       </Table>
 
       <BarcodeLabelDialog item={printItem} onClose={() => setPrintItem(null)} />
+
+      {/* One 50×25mm label per selected item — print-only, read by handleBulkPrint */}
+      {selectedItems.map((item) => (
+        <div
+          key={item.serialNumber}
+          className="bulk-barcode-label barcode-sticker-container hidden w-[50mm] h-[25mm] flex-col items-center justify-center bg-white text-black p-1"
+        >
+          <Barcode value={item.serialNumber} width={1.15} height={28} fontSize={9} margin={0} />
+          <div className="text-[7px] leading-none font-semibold max-w-[46mm] truncate mt-0.5">
+            {item.modelName}
+          </div>
+        </div>
+      ))}
     </>
   )
 }

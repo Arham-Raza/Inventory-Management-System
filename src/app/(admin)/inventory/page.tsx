@@ -4,6 +4,7 @@ import { auth } from "@/auth"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Package, Hash, Wallet, Clock } from "lucide-react"
 import { formatCurrency } from "@/lib/money"
+import { PageHelp } from "@/components/layout/PageHelp"
 
 export default async function InventoryPage() {
   const [stats, items, session] = await Promise.all([
@@ -17,9 +18,24 @@ export default async function InventoryPage() {
     <div className="space-y-6">
       {/* ── Header ── */}
       <div>
-        <h1 className="text-3xl font-bold tracking-tight text-slate-900">
-          Inventory Ledger
-        </h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-3xl font-bold tracking-tight text-slate-900">
+            Inventory Ledger
+          </h1>
+          <PageHelp title="Inventory Ledger">
+            <p>
+              Every laptop the shop owns, one row per physical unit, keyed by
+              its serial number.
+            </p>
+            <ul>
+              <li><strong>Pending Approval</strong> — just entered by Data Entry staff; a SUPER_ADMIN must approve before it can be sold.</li>
+              <li><strong>Available</strong> — sellable, shows up at the POS.</li>
+              <li><strong>Sold / Out for Repair / In Warranty</strong> — not sellable right now; tracked in the Repair Dispatch or Warranty tabs respectively.</li>
+              <li>Use the checkboxes to select several units and <strong>print all their barcode labels in one job</strong> instead of one at a time.</li>
+              <li>New stock is added from the <strong>Receive Stock</strong> page, not here.</li>
+            </ul>
+          </PageHelp>
+        </div>
         <p className="text-slate-500 mt-1">
           Every physical unit tracked by serial number.
         </p>

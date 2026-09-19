@@ -3,6 +3,7 @@ import { AddDiscountDialog } from "@/components/discounts/AddDiscountDialog"
 import { DiscountsTable } from "@/components/discounts/DiscountsTable"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tag, Percent, ToggleRight } from "lucide-react"
+import { PageHelp } from "@/components/layout/PageHelp"
 
 export default async function DiscountsPage() {
   const campaigns = await prisma.discountCampaign.findMany({
@@ -23,9 +24,23 @@ export default async function DiscountsPage() {
       {/* ── Header ── */}
       <div className="flex justify-between items-start">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight text-slate-900">
-            Discount Campaigns
-          </h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-3xl font-bold tracking-tight text-slate-900">
+              Discount Campaigns
+            </h1>
+            <PageHelp title="Discount Campaigns">
+              <p>
+                Promotions a cashier can apply at the POS checkout screen —
+                only <strong>active</strong> campaigns show up there.
+              </p>
+              <ul>
+                <li><strong>Percentage</strong> or <strong>Fixed Amount (RM)</strong> off the subtotal, before tax.</li>
+                <li>Toggle a campaign active/inactive here — it disappears from the POS dropdown instantly when off, no need to delete it.</li>
+                <li>A campaign is separate from a <strong>Manager Override</strong>, which a cashier can also request at checkout with a manager&apos;s credentials — the two can&apos;t be applied on the same order.</li>
+                <li>Loyalty points redemption (from the customer&apos;s balance) stacks on top of whichever discount is applied here.</li>
+              </ul>
+            </PageHelp>
+          </div>
           <p className="text-slate-500 mt-1">
             Manage promotions available to cashiers at checkout.
           </p>

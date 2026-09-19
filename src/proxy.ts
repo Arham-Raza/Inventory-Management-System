@@ -31,8 +31,12 @@ export default auth((req) => {
     }
 
     if (role === "DATA_ENTRY") {
-      // Data Entry can ONLY hit /data-entry
-      if (!nextUrl.pathname.startsWith("/data-entry")) {
+      // Data Entry can hit /data-entry, plus /component-prices (component
+      // pricing is shared editing access across Data Entry / Manager / Super Admin)
+      if (
+        !nextUrl.pathname.startsWith("/data-entry") &&
+        !nextUrl.pathname.startsWith("/component-prices")
+      ) {
         return NextResponse.redirect(new URL("/data-entry", nextUrl))
       }
     }
@@ -40,8 +44,8 @@ export default auth((req) => {
     if (role === "MANAGER") {
       // Managers cannot hit accounting, discounts, or employees
       if (
-        nextUrl.pathname.startsWith("/accounting") || 
-        nextUrl.pathname.startsWith("/discounts") || 
+        nextUrl.pathname.startsWith("/accounting") ||
+        nextUrl.pathname.startsWith("/discounts") ||
         nextUrl.pathname.startsWith("/employees")
       ) {
         return NextResponse.redirect(new URL("/dashboard", nextUrl))

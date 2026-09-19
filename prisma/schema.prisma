@@ -21,6 +21,189 @@ enum ItemStatus {
   SOLD
   RETURNED
   REJECTED
+  OUT_FOR_REPAIR
+  IN_WARRANTY
+}
+
+enum WarrantyClaimStatus {
+  RECEIVED
+  SETTLED
+  RETURNED_TO_STOCK
+}
+
+// Created the moment a previously-sold serial is scanned back in at the POS
+// and staff picks "Warranty Claim" on the return-triage prompt — the unit is
+// physically in hand at that point, so the receiving checklist happens in
+// the same motion. The other four triage outcomes (Return, Replacement,
+// Buy-back, Trade-in) aren't built out yet — see the RETURN_TRIAGE_RECORDED
+// audit log entries for those.
+model WarrantyClaim {
+  id                String              @id @default(uuid())
+  serialNumber      String
+  inventoryItem     InventoryItem       @relation(fields: [serialNumber], references: [serialNumber])
+  status            WarrantyClaimStatus @default(RECEIVED)
+  // Receiving checklist — informational, not a submission gate.
+  stickerPresent    Boolean
+  ramHddMatches     Boolean
+  chargerReturned   Boolean
+  freeGiftsReturned Boolean
+  receivedById      String
+  receivedBy        User                @relation("WarrantyReceivedBy", fields: [receivedById], references: [id])
+  settledAt         DateTime?
+  settledById       String?
+  settledBy         User?               @relation("WarrantySettledBy", fields: [settledById], references: [id])
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  @@index([status])
+  @@index([serialNumber])
+}
+
+enum WalkInJobStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+// A customer-owned device brought in for repair/upgrade/service — never part
+// of our own sellable inventory, so this is deliberately its own model
+// rather than reusing InventoryItem. `estimatedCost`/`actualCost` are what we
+// charge the customer (typically the estimate is paid 100% upfront);
+// `shopCost` is what the job cost us (parts/labor/technician fee) — the
+// difference between the two is the profit on the job.
+model WalkInRepairJob {
+  id                String          @id @default(uuid())
+  barcode           String          @unique
+  jobType           String // "REPAIR" | "UPGRADE" | "SERVICE"
+  customerName      String
+  customerPhone     String?
+  deviceDescription String
+  issueDescription  String          @db.Text
+  estimatedCost     Decimal         @db.Decimal(10, 2)
+  actualCost        Decimal?        @db.Decimal(10, 2)
+  shopCost          Decimal?        @db.Decimal(10, 2)
+  technicianId      String?
+  technician        Technician?     @relation(fields: [technicianId], references: [id])
+  status            WalkInJobStatus @default(IN_PROGRESS)
+  intakeById        String
+  intakeBy          User            @relation("WalkInIntakeBy", fields: [intakeById], references: [id])
+  completedAt       DateTime?
+  completedById     String?
+  completedBy       User?           @relation("WalkInCompletedBy", fields: [completedById], references: [id])
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([status])
+}
+
+enum StockTakeSessionStatus {
+  OPEN
+  CLOSED
+}
+
+// A single physical stock count. Scoped to all AVAILABLE inventory at once —
+// there's no location/warehouse concept in the schema to split by. Multiple
+// sessions can be open at the same time (e.g. different staff covering
+// different sections); nothing stops the same serial being scanned into two
+// of them, that's a process concern, not something the system enforces.
+model StockTakeSession {
+  id          String                 @id @default(uuid()) @db.VarChar(36)
+  status      StockTakeSessionStatus @default(OPEN)
+  startedById String
+  startedBy   User                   @relation("StockTakeStartedBy", fields: [startedById], references: [id])
+  closedAt    DateTime?
+  closedById  String?
+  closedBy    User?                  @relation("StockTakeClosedBy", fields: [closedById], references: [id])
+  scans       StockTakeScan[]
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+}
+
+// One row per distinct serial scanned into a session — the @@unique below is
+// the duplicate-scan guard: a repeat scan of the same serial in the same
+// session just hits the existing row instead of creating a second count.
+model StockTakeScan {
+  id           String           @id @default(uuid())
+  sessionId    String           @db.VarChar(36)
+  session      StockTakeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // Explicitly short so the composite unique index below stays under
+  // MySQL's key-length limit — no real serial number gets anywhere close.
+  serialNumber String           @db.VarChar(64)
+  // Snapshot at scan time — true if this serial existed in inventory when
+  // scanned, so the report still makes sense even if the item is edited or
+  // removed afterward.
+  recognized   Boolean
+  scannedById  String
+  scannedBy    User             @relation("StockTakeScannedBy", fields: [scannedById], references: [id])
+  createdAt    DateTime         @default(now())
+
+  @@unique([sessionId, serialNumber])
+  @@index([sessionId])
+}
+
+enum RepairDispatchStatus {
+  OUT_FOR_REPAIR
+  RETURNED
+}
+
+model Technician {
+  id         String            @id @default(uuid())
+  name       String
+  phone      String?
+  specialty  String?
+  active     Boolean           @default(true)
+  dispatches RepairDispatch[]
+  walkInJobs WalkInRepairJob[]
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+}
+
+// One row per physical unit sent out for repair. `batchId` is just a shared
+// grouping key for every unit handed to a technician in the same trip — used
+// to render one delivery order / Excel sheet — not a separate entity.
+model RepairDispatch {
+  id                 String               @id @default(uuid())
+  batchId            String
+  serialNumber       String
+  inventoryItem      InventoryItem        @relation(fields: [serialNumber], references: [serialNumber])
+  technicianId       String
+  technician         Technician           @relation(fields: [technicianId], references: [id])
+  remarks            String?              @db.Text
+  // Quoted cost — captured when the unit comes BACK (that's when the
+  // technician actually names a price), not at dispatch time.
+  cost               Decimal?             @db.Decimal(10, 2)
+  expectedReturnDate DateTime?
+  status             RepairDispatchStatus @default(OUT_FOR_REPAIR)
+  dispatchedById     String
+  dispatchedBy       User                 @relation("RepairDispatchedBy", fields: [dispatchedById], references: [id])
+  returnedAt         DateTime?
+  returnedById       String?
+  returnedBy         User?                @relation("RepairReturnedBy", fields: [returnedById], references: [id])
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@index([batchId])
+  @@index([status])
+  @@index([serialNumber])
+}
+
+enum ComponentType {
+  RAM
+  STORAGE
+}
+
+// Admin-maintained price for a given RAM/storage spec, keyed on the exact
+// same free-text label used in InventoryItem.ram / .storage (e.g. "16GB
+// DDR4") — used to auto-split a laptop's sale price when the confirmed
+// spec at checkout differs from what it was stocked in with.
+model ComponentPrice {
+  id        String        @id @default(uuid())
+  type      ComponentType
+  label     String
+  price     Decimal       @db.Decimal(10, 2)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@unique([type, label])
 }
 
 model User {
@@ -32,20 +215,34 @@ model User {
   orders                 Order[]
   createdInventoryItems  InventoryItem[] @relation("InventoryCreatedBy")
   approvedInventoryItems InventoryItem[] @relation("InventoryApprovedBy")
+  createdAccessories     Accessory[]     @relation("AccessoryCreatedBy")
   manualDiscountsGiven   Order[]         @relation("ManualDiscountAuthorizedBy")
   auditLogs              AuditLog[]
+  repairDispatchesSent     RepairDispatch[] @relation("RepairDispatchedBy")
+  repairDispatchesReceived RepairDispatch[] @relation("RepairReturnedBy")
+  warrantyClaimsReceived   WarrantyClaim[]  @relation("WarrantyReceivedBy")
+  warrantyClaimsSettled    WarrantyClaim[]  @relation("WarrantySettledBy")
+  walkInJobsIntake         WalkInRepairJob[] @relation("WalkInIntakeBy")
+  walkInJobsCompleted      WalkInRepairJob[] @relation("WalkInCompletedBy")
+  stockTakeSessionsStarted StockTakeSession[] @relation("StockTakeStartedBy")
+  stockTakeSessionsClosed  StockTakeSession[] @relation("StockTakeClosedBy")
+  stockTakeScans           StockTakeScan[]    @relation("StockTakeScannedBy")
   createdAt              DateTime        @default(now())
   updatedAt              DateTime        @updatedAt
 }
 
 model Customer {
-  id        String   @id @default(uuid())
-  name      String
-  phone     String   @unique
-  email     String?
-  orders    Order[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String   @id @default(uuid())
+  name          String
+  phone         String   @unique
+  email         String?
+  // Loyalty points balance, in whole points — see src/lib/loyalty.ts for the
+  // earn/redeem conversion rates.
+  points        Int      @default(0)
+  whatsappOptIn Boolean  @default(true)
+  orders        Order[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 model InventoryItem {
@@ -69,11 +266,35 @@ model InventoryItem {
   approvedById String?
   approvedBy   User?      @relation("InventoryApprovedBy", fields: [approvedById], references: [id])
   approvedAt   DateTime?
+  repairDispatches RepairDispatch[]
+  warrantyClaims   WarrantyClaim[]
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
   @@index([lotNumber])
   @@index([status])
+}
+
+// Non-serialized stock (chargers, cables, cases, ...). Unlike InventoryItem,
+// one row represents a whole SKU tracked by running quantity, not one
+// physical unit — sold at the POS by scanning/adjusting a quantity rather
+// than the laptop flow's per-unit spec-confirmation dialog.
+model Accessory {
+  id           String      @id @default(uuid())
+  // Existing manufacturer barcode when the sheet had one; otherwise an
+  // internally-generated "ACC-NNNNNN" SKU (see generateAccessoryBarcode).
+  barcode      String      @unique
+  name         String
+  costPrice    Decimal?    @db.Decimal(10, 2)
+  sellingPrice Decimal     @db.Decimal(10, 2)
+  quantity     Int         @default(0)
+  orderItems   OrderItem[]
+  createdById  String?
+  createdBy    User?       @relation("AccessoryCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([name])
 }
 
 model Order {
@@ -94,6 +315,9 @@ model Order {
   manualDiscountReason String?
   manualDiscountById   String?
   manualDiscountBy     User?             @relation("ManualDiscountAuthorizedBy", fields: [manualDiscountById], references: [id])
+  // Loyalty points snapshot for this order — null when no customer was attached.
+  pointsEarned         Int?
+  pointsRedeemed       Int?
   items                OrderItem[]
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
@@ -104,7 +328,21 @@ model OrderItem {
   orderId       String
   order         Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
   inventoryItem InventoryItem?
+  // Set instead of inventoryItem for a quantity-based accessory line.
+  accessoryId   String?
+  accessory     Accessory?     @relation(fields: [accessoryId], references: [id])
+  // Always 1 for a serialized laptop row; the sold quantity for an accessory row.
+  quantity      Int            @default(1)
   priceAtSale   Decimal        @db.Decimal(10, 2)
+  // Spec snapshot + revenue-line breakdown for a laptop row — see
+  // src/lib/componentSplit.ts. Null on every accessory row, and null on a
+  // laptop row too when the confirmed spec matched what it was stocked in
+  // with (nothing to split).
+  originalRam        String?
+  originalStorage    String?
+  laptopPriceAtSale  Decimal? @db.Decimal(10, 2)
+  ramPriceAtSale     Decimal? @db.Decimal(10, 2)
+  storagePriceAtSale Decimal? @db.Decimal(10, 2)
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
 }

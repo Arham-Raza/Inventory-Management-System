@@ -8,7 +8,7 @@ import { isRateLimited } from "@/lib/rate-limit"
 export async function loginAction(formData: FormData) {
   const parsed = LoginSchema.safeParse(Object.fromEntries(formData.entries()))
   if (!parsed.success) {
-    return { error: parsed.error.errors[0].message }
+    return { error: parsed.error.issues[0].message }
   }
 
   const email = parsed.data.email

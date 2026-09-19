@@ -10,7 +10,7 @@ export async function logAuditAction(
       data: {
         userId,
         action,
-        details: details ? JSON.stringify(details) : null,
+        details: details ?? undefined,
       },
     })
   } catch (error) {

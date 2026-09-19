@@ -29,13 +29,17 @@ export function calculateTax(taxableAmount: number): number {
 
 export function calculateOrderTotals(
   subtotal: number,
-  discount: { type: string; value: number } | null
+  discount: { type: string; value: number } | null,
+  pointsRedemptionValue: number = 0
 ) {
   const discountAmount = calculateDiscount(subtotal, discount)
-  const discountedSubtotal = Math.max(0, subtotal - discountAmount)
+  const afterDiscount = Math.max(0, subtotal - discountAmount)
+  // Clamp so redeemed points can never push the total below zero.
+  const redemptionAmount = Math.min(Math.max(0, pointsRedemptionValue), afterDiscount)
+  const discountedSubtotal = Math.max(0, afterDiscount - redemptionAmount)
   const tax = calculateTax(discountedSubtotal)
   const total = fromPaisa(toPaisa(discountedSubtotal) + toPaisa(tax))
-  return { discountAmount, discountedSubtotal, tax, total }
+  return { discountAmount, redemptionAmount, discountedSubtotal, tax, total }
 }
 
 export function formatCurrency(amount: number): string {
